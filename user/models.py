@@ -1,5 +1,11 @@
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
+from django.conf import settings
+
+from django_otp.util import random_hex
+def generate_otp():
+    import random
+    return str(random.randint(1000, 9999))
 
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -34,6 +40,7 @@ class User(AbstractBaseUser, PermissionsMixin):
             ('manager', 'Manager'),
         ],
     )
+    otp_secret = models.CharField(max_length=4, default=generate_otp, editable=False)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     groups = models.ManyToManyField(
@@ -54,3 +61,16 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.username
+
+class Profile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    otp_secret = models.CharField(max_length=4, default=generate_otp, editable=False)
+
+class FileUpload(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    file = models.FileField(upload_to='uploads/')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    profile_picture = models.ImageField(upload_to='uploads/', null=True, blank=True)
+
+    def __str__(self):
+        return f"File by {self.user.username} at {self.uploaded_at}"

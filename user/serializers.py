@@ -1,7 +1,8 @@
 from rest_framework import serializers
-from user.models import User
+from user.models import User, FileUpload
 from django.contrib.auth.hashers import check_password
 from rest_framework_simplejwt.tokens import RefreshToken
+# from .models import FileUpload
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -15,7 +16,6 @@ class CreateUserSerializer(serializers.ModelSerializer):
         extra_kwargs = {'password': {'write_only': True}}
 
     def create(self, validated_data):
-        # Hash the password
         user = User.objects.create_user(
             username=validated_data['username'],
             email=validated_data['email'],
@@ -24,6 +24,10 @@ class CreateUserSerializer(serializers.ModelSerializer):
             role=validated_data.get('role'),
         )
 
+        # Assign OTP secret
+        user.otp_secret = random_hex()
+        user.save()
+
         # Generate JWT token
         refresh = RefreshToken.for_user(user)
         token_data = {
@@ -31,8 +35,8 @@ class CreateUserSerializer(serializers.ModelSerializer):
             'access': str(refresh.access_token),
         }
 
-        # Include the token in the response
         return user, token_data
+
 
 class UpdateUserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -51,3 +55,10 @@ class UpdateUserSerializer(serializers.ModelSerializer):
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField()
     password = serializers.CharField(write_only=True)
+
+# class FileUploadSerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = FileUpload
+#         fields = ['id', 'user', 'file', 'uploaded_at']
+#         read_only_fields =['uploaded_at']
+        # extra_kwargs = {'file': {'write_only': True}}

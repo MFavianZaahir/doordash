@@ -1,34 +1,60 @@
+import pyotp
+from .serializers import UserSerializer, CreateUserSerializer, LoginSerializer, UpdateUserSerializer
+from user.models import User
+from .tasks import send_otp_email
+from user.permissions import IsManager
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, generics, permissions
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import IsAuthenticated
-from .serializers import UserSerializer, CreateUserSerializer, LoginSerializer, UpdateUserSerializer
-from user.models import User
-from user.permissions import IsManager
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.parsers import MultiPartParser, FormParser
+from django.core.cache import cache
+from django_otp.oath import totp
+from django.conf import settings
+from django.core.mail import send_mail
+from time import time
+import base64
+import binascii
 
-class UserListCreateView(generics.ListCreateAPIView):
-    queryset = User.objects.all()
-    serializer_class = CreateUserSerializer
-    permission_classes = [IsAuthenticated, IsManager]  # Add IsManager
+class UserListCreateView(APIView):
+    permission_classes = [permissions.AllowAny]
 
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+    def post(self, request):
+        serializer = CreateUserSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        user, token_data = serializer.save()
 
-        # Save the user and generate token
-        user, token_data = serializer.create(serializer.validated_data)
+        # Generate OTP and save the data in cache
+        email = serializer.validated_data.get('email')
+        otp_secret = pyotp.random_base32()
+        totp_instance = pyotp.TOTP(otp_secret, interval=300)  # 5-minute window
+        otp = totp_instance.now()
 
-        headers = self.get_success_headers(serializer.data)
-        return Response(
-            {
-                "user": UserSerializer(user).data,
-                "token": token_data
-            },
-            status=status.HTTP_201_CREATED,
-            headers=headers,
-        )
+        # Store user data temporarily in cache
+        cache_key = f"pending_user_{email}"
+        cache.set(cache_key, {
+            "user_data": serializer.validated_data,
+            "otp_secret": otp_secret,
+        }, timeout=300)  # OTP is valid for 5 minutes
+
+        # Send OTP via email
+        send_otp_email.delay(email, otp)
+        # subject = "Your OTP for Account Verification"
+        # message = f"Dear {serializer.validated_data.get('username')},\n\nYour OTP for verification is: {otp}\nThis OTP is valid for 5 minutes."
+        # from_email = settings.DEFAULT_FROM_EMAIL
+        # recipient_list = [email]
+
+        # try:
+        #     send_mail(subject, message, from_email, recipient_list)
+        #     response_message = "OTP sent to your email."
+        # except Exception as e:
+        #     response_message = f"Failed to send email: {str(e)}"
+
+        return Response({
+            "message": "OTP sent to your email."
+        }, status=status.HTTP_201_CREATED)
 
 class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
@@ -56,7 +82,6 @@ class UpdateUserView(generics.UpdateAPIView):
 
         return Response(serializer.data)
 
-
 class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -80,3 +105,49 @@ class LoginView(APIView):
 
         except User.DoesNotExist:
             return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+
+class VerifyOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+
+        if not email or not otp:
+            return Response({"error": "Email and OTP are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Retrieve pending user data from cache
+        cache_key = f"pending_user_{email}"
+        pending_user = cache.get(cache_key)
+        if not pending_user:
+            return Response({"error": "OTP expired or invalid."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Extract OTP secret
+        otp_secret = pending_user['otp_secret']
+        totp_instance = pyotp.TOTP(otp_secret, interval=300)
+
+        # Debug logs
+        print("Cached OTP Secret:", otp_secret)
+        print("OTP from User:", otp)
+        print("Generated OTP:", totp_instance.now())  # Current valid OTP
+
+        # Verify the OTP
+        if not totp_instance.verify(otp, valid_window=1):  # Allow small time drift
+            return Response({"error": "Invalid OTP."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # Create the user and save to database
+        user_data = pending_user['user_data']
+        user = User.objects.create_user(**user_data)
+
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+
+        # Remove data from cache
+        cache.delete(cache_key)
+
+        return Response({
+            "message": "User created successfully.",
+            "user": UserSerializer(user).data,
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+        }, status=status.HTTP_201_CREATED)
