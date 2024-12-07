@@ -14,10 +14,12 @@ from django.core.cache import cache
 from django_otp.oath import totp
 from django.conf import settings
 from django.core.mail import send_mail
+from celery.result import AsyncResult 
 from time import time
+import logging
 import base64
 import binascii
-
+logger = logging.getLogger(__name__)
 class UserListCreateView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -31,7 +33,7 @@ class UserListCreateView(APIView):
         otp_secret = pyotp.random_base32()
         totp_instance = pyotp.TOTP(otp_secret, interval=300)  # 5-minute window
         otp = totp_instance.now()
-
+        print(email)
         # Store user data temporarily in cache
         cache_key = f"pending_user_{email}"
         cache.set(cache_key, {
@@ -40,7 +42,7 @@ class UserListCreateView(APIView):
         }, timeout=300)  # OTP is valid for 5 minutes
 
         # Send OTP via email
-        send_otp_email.delay(email, otp)
+        send_otp_email(email, otp, otp)
         # subject = "Your OTP for Account Verification"
         # message = f"Dear {serializer.validated_data.get('username')},\n\nYour OTP for verification is: {otp}\nThis OTP is valid for 5 minutes."
         # from_email = settings.DEFAULT_FROM_EMAIL
@@ -55,6 +57,57 @@ class UserListCreateView(APIView):
         return Response({
             "message": "OTP sent to your email."
         }, status=status.HTTP_201_CREATED)
+
+class VerifyOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+
+        if not email or not otp:
+            logger.warning("Email or OTP missing in the verification request.")
+            return Response({"error": "Email and OTP are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Retrieve pending user data from cache
+            cache_key = f"pending_user_{email}"
+            pending_user = cache.get(cache_key)
+            if not pending_user:
+                logger.warning(f"Pending user data not found for {email}.")
+                return Response({"error": "OTP expired or invalid."}, status=status.HTTP_400_BAD_REQUEST)
+
+            otp_secret = pending_user['otp_secret']
+            totp_instance = pyotp.TOTP(otp_secret, interval=300)
+            logger.info(f"Verifying OTP for {email}. User OTP: {otp}, Generated OTP: {totp_instance.now()}")
+
+            # Verify the OTP
+            if not totp_instance.verify(otp, valid_window=1):
+                logger.warning(f"Invalid OTP for {email}.")
+                return Response({"error": "Invalid OTP."}, status=status.HTTP_401_UNAUTHORIZED)
+
+            # Create user only after successful OTP verification
+            user_data = pending_user['user_data']
+            user = User.objects.create_user(**user_data)
+            logger.info(f"User created for {email}.")
+
+            # Generate JWT tokens
+            refresh = RefreshToken.for_user(user)
+
+            # Remove cached data
+            cache.delete(cache_key)
+            logger.info(f"Cleared cached data for {email}.")
+
+            return Response({
+                "message": "User created successfully.",
+                "user": UserSerializer(user).data,
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            logger.error(f"Failed to verify OTP for {email}: {e}")
+            return Response({"error": "Verification failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
@@ -105,49 +158,3 @@ class LoginView(APIView):
 
         except User.DoesNotExist:
             return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
-
-class VerifyOTPView(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        email = request.data.get('email')
-        otp = request.data.get('otp')
-
-        if not email or not otp:
-            return Response({"error": "Email and OTP are required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Retrieve pending user data from cache
-        cache_key = f"pending_user_{email}"
-        pending_user = cache.get(cache_key)
-        if not pending_user:
-            return Response({"error": "OTP expired or invalid."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Extract OTP secret
-        otp_secret = pending_user['otp_secret']
-        totp_instance = pyotp.TOTP(otp_secret, interval=300)
-
-        # Debug logs
-        print("Cached OTP Secret:", otp_secret)
-        print("OTP from User:", otp)
-        print("Generated OTP:", totp_instance.now())  # Current valid OTP
-
-        # Verify the OTP
-        if not totp_instance.verify(otp, valid_window=1):  # Allow small time drift
-            return Response({"error": "Invalid OTP."}, status=status.HTTP_401_UNAUTHORIZED)
-
-        # Create the user and save to database
-        user_data = pending_user['user_data']
-        user = User.objects.create_user(**user_data)
-
-        # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
-
-        # Remove data from cache
-        cache.delete(cache_key)
-
-        return Response({
-            "message": "User created successfully.",
-            "user": UserSerializer(user).data,
-            "refresh": str(refresh),
-            "access": str(refresh.access_token),
-        }, status=status.HTTP_201_CREATED)

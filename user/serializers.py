@@ -2,12 +2,35 @@ from rest_framework import serializers
 from user.models import User, FileUpload
 from django.contrib.auth.hashers import check_password
 from rest_framework_simplejwt.tokens import RefreshToken
-# from .models import FileUpload
+from .models import User
+from .utils import random_hex
+from django.core.mail import send_mail
+
+def send_otp_email(email, otp):
+    subject = "Your OTP for Account Verification"
+    message = f"Your One-Time Password (OTP) is {otp}. Please use it to verify your account."
+    send_mail(subject, message, 'your-email@gmail.com', [email])
+
+def create(self, validated_data):
+    otp = random_hex(8)
+    email = validated_data.get("email")
+
+    user = User.objects.create_user(**validated_data, is_active=False, otp_secret=otp)
+    send_otp_email(email, otp)  # Send the OTP email
+
+    return user
+
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'age', 'role', 'is_active', 'is_staff']
+
+        def create(self, validated_data):
+            user = User.objects.create(**validated_data)
+            user.otp_secret = random_hex()  # Generate a secure OTP
+            user.save()
+            return user
 
 class CreateUserSerializer(serializers.ModelSerializer):
     class Meta:

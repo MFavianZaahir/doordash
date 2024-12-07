@@ -40,7 +40,7 @@ class User(AbstractBaseUser, PermissionsMixin):
             ('manager', 'Manager'),
         ],
     )
-    otp_secret = models.CharField(max_length=4, default=generate_otp, editable=False)
+    otp_secret = models.CharField(max_length=12, blank=True, null=True)  # Adjust the length as needed
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     groups = models.ManyToManyField(
@@ -64,7 +64,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 class Profile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
-    otp_secret = models.CharField(max_length=4, default=generate_otp, editable=False)
+    otp_secret = models.CharField(max_length=12, blank=True, null=True)  # Adjust the length as needed
 
 class FileUpload(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
