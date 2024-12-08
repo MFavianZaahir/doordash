@@ -157,7 +157,7 @@ EMAIL_HOST = 'smtp.gmail.com'  # Or your email service
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'favianzaahir@gmail.com'
-EMAIL_HOST_PASSWORD = 'ijnu msbd ntno smuk'
+EMAIL_HOST_PASSWORD = 'xxxx xxxx xxxx xxxx'
 
 
 
